@@ -39,7 +39,11 @@ namespace App1
         protected override async void OnNavigatedTo(NavigationEventArgs e)
         {
             await tft.initialize();
-            tft.capture(this, 100);
+            tft.fillRect(0, 0, tft.MaxWidth, tft.MaxHeight, Color.FromArgb(0xFF, 0xff, 0, 0xFF));
+
+            RenderTargetBitmap image = await GetImage(this, tft.MaxWidth, tft.MaxHeight);
+
+           // await tft.Render(image);
         }
     }
 }
