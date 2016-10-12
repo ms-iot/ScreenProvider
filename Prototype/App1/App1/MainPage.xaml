@@ -9,10 +9,9 @@
     mc:Ignorable="d">
 
     <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Width="240" Height="320">
-        <Grid.RenderTransform>
-            <ScaleTransform ScaleX="-1.0"/>
-        </Grid.RenderTransform>
-        <CalendarView HorizontalAlignment="Left" VerticalAlignment="Top" Height="320" Width="240"/>
-
+        <StackPanel Orientation="Horizontal">
+            <ToggleSwitch Header="Toggle Switch Example"/>
+            <ProgressRing IsActive="True"/>
+        </StackPanel>
     </Grid>
 </Page>

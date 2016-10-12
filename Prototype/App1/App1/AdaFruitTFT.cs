@@ -12,6 +12,7 @@ using System.Diagnostics;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Media.Imaging;
 using System.Runtime.InteropServices.WindowsRuntime;
+using Windows.UI.Xaml;
 
 namespace App1
 {
@@ -27,6 +28,8 @@ namespace App1
 
         GpioController IoController;
         GpioPin DC;
+        DispatcherTimer captureTimer = null;
+        UIElement captureTarget = null;
 
         const int kResetDelay = 5;
         byte resetCommand = 0x1;
@@ -145,7 +148,11 @@ namespace App1
             await Task.Delay(20);
 
             this.orientation = Orientation.Portrait;
+
+            captureTimer = new DispatcherTimer();
+            captureTimer.Tick += CaptureTimer_Tick;
         }
+
 
         private Orientation currentOrientation = Orientation.Portrait;
 
@@ -227,7 +234,6 @@ namespace App1
 
         public void fillRect(int x, int y, int w, int h, Color color)
         {
-            const int kMaxSPISize = 65000; /// 19200;
             setWindow(x, y, w, h);
 
             var numPixels = w * h;
@@ -235,76 +241,55 @@ namespace App1
             var colorArray = getColorBytes(color);
             sendC(0x2C);
 
-            byte[] framebuffer = new byte[kMaxSPISize];
+            byte[] framebuffer = new byte[numPixelBytes];
             for (int pixel = 0; pixel < framebuffer.Length; pixel += 2)
             {
                 framebuffer[pixel] = colorArray[0];
                 framebuffer[pixel + 1] = colorArray[1];
             }
-
-            for (int buff = numPixelBytes / kMaxSPISize; buff >= 0; buff--)
-            {
-                sendD(framebuffer);
-            }
-
-            var remainder = numPixelBytes % kMaxSPISize;
-            if (remainder > 0)
-            {
-                byte[] framebuffer2 = new byte[remainder];
-                Array.Copy(framebuffer, framebuffer2, remainder);
-                sendD(framebuffer2);
-            }
+            sendD(framebuffer);
         }
 
         public async Task Render(RenderTargetBitmap image)
         {
             var buffer = await image.GetPixelsAsync();
-            const int kMaxSPISize = 65000; /// 19200;
-
-            int spilines = kMaxSPISize / (image.PixelWidth * 2);
-            int spiblock = spilines * (image.PixelWidth * 2);
-
             var numPixels = image.PixelWidth * image.PixelHeight;
             var numPixelBytes = numPixels * 2;
 
-            byte[] framebuffer = new byte[spiblock];
+            byte[] framebuffer = new byte[numPixelBytes];
 
-            var y = 0;
-            var offset = 0;
-            for (int buff = 0; buff < numPixelBytes / spiblock; buff++)
+            byte[] pixels = buffer.ToArray();
+            for (int y = 0; y < image.PixelHeight; y++)
             {
-                offset = buff * spiblock * 2;
-                byte[] pixels = WindowsRuntimeBufferExtensions.ToArray(buffer, (uint)offset, spiblock * 2);
-                for (int frameBuff = 0, source = 0; frameBuff < framebuffer.Length; frameBuff += 2, source+=4)
+                for (int x = 0; x < image.PixelWidth; x++)
                 {
-                    int color565 = (((pixels[source + 0] & 0xF8) << 8) | ((pixels[source + 1] & 0xFC) << 3) | ((pixels[source + 2] & 0xF8) >> 3));
-                    framebuffer[frameBuff] = (byte)((color565 >> 8) & 0xFF);
-                    framebuffer[frameBuff + 1] = (byte)((color565 & 0xFF));
-                }
+                    int destX = (y * image.PixelWidth + x) * 2;
+                    int sourceX = (y * image.PixelWidth + (image.PixelWidth - x - 1)) * 4;
 
-                setWindow(0, y, image.PixelWidth, spilines);
-                sendC(0x2C);
-                sendD(framebuffer);
-                y += spilines;
+                    int color565 = (((pixels[sourceX + 0] & 0xF8) << 8) | ((pixels[sourceX + 1] & 0xFC) << 3) | ((pixels[sourceX + 2] & 0xF8) >> 3));
+
+                    framebuffer[destX] = (byte)((color565 >> 8) & 0xFF);
+                    framebuffer[destX + 1] = (byte)((color565 & 0xFF));
+                }
             }
 
-            offset += spiblock * 2;
-            var remainder = numPixelBytes % spiblock;
-            if (remainder > 0)
-            {
-                byte[] framebuffer2 = new byte[remainder];
-                byte[] pixels = WindowsRuntimeBufferExtensions.ToArray(buffer, (uint)(offset), remainder * 2);
-                for (int frameBuff = 0, source = 0; frameBuff < framebuffer2.Length; frameBuff += 2, source += 4)
-                {
-                    int color565 = (((pixels[source + 0] & 0xF8) << 8) | ((pixels[source + 1] & 0xFC) << 3) | ((pixels[source + 2] & 0xF8) >> 3));
-                    framebuffer2[frameBuff] = (byte)((color565 >> 8) & 0xFF);
-                    framebuffer2[frameBuff + 1] = (byte)((color565 & 0xFF));
-                }
-                var linesLeft = image.PixelHeight - y;
-                setWindow(0, y, image.PixelWidth, linesLeft);
-                sendC(0x2C);
-                sendD(framebuffer2);
-            }
+            setWindow(0, 0, image.PixelWidth, image.PixelHeight);
+            sendC(0x2C);
+            sendD(framebuffer);
+        }
+
+
+        public void capture(UIElement target, uint milli)
+        {
+            captureTarget = target;
+            captureTimer.Interval = TimeSpan.FromMilliseconds(milli);
+            captureTimer.Start();
+        }
+        private async void CaptureTimer_Tick(object sender, object e)
+        {
+            var renderBitmap = new RenderTargetBitmap();
+            await renderBitmap.RenderAsync(captureTarget, MaxWidth, MaxHeight);
+            await Render(renderBitmap);
         }
     }
 }
