@@ -15,21 +15,7 @@ DefinitionBlock ("ACPITABL.dat", "SSDT", 1, "MSFT", "DISPLAY", 1)
             Name(_UID, 1)
 
             Name(_CRS, ResourceTemplate()
-            {
-				// low-speed control channel (1Mhz)
-                SPISerialBus(
-					0,
-                    PolarityLow,
-                    FourWireMode,
-                    8,
-                    ControllerInitiated,
-                    1000000,
-                    ClockPolarityLow,
-                    ClockPhaseFirst,
-                    "\\_SB.SPI0",
-                    0,
-                    )
-				
+            {				
 				// high-speed data channel (48Mhz)
 				SPISerialBus(
 					0,
