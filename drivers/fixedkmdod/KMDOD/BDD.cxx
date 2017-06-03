@@ -879,9 +879,9 @@ NTSTATUS BASIC_DISPLAY_DRIVER::PresentDisplayOnly(_In_ CONST DXGKARG_PRESENT_DIS
 		m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].ZeroedOutStart.QuadPart = 0;
 		m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].ZeroedOutEnd.QuadPart = 0;
 
-		D3DKMDT_VIDPN_PRESENT_PATH_ROTATION RotationNeededByFb = pPresentDisplayOnly->Flags.Rotate ?
-			m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Rotation :
-			D3DKMDT_VPPR_IDENTITY;
+		//D3DKMDT_VIDPN_PRESENT_PATH_ROTATION RotationNeededByFb = pPresentDisplayOnly->Flags.Rotate ?
+		//	m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Rotation :
+		//	D3DKMDT_VPPR_IDENTITY;
 		BYTE* pDst = (BYTE*)m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].FrameBuffer.Ptr;
 
 		UINT DstBitPerPixel = BPPFromPixelFormat(m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.ColorFormat);
@@ -915,16 +915,16 @@ NTSTATUS BASIC_DISPLAY_DRIVER::PresentDisplayOnly(_In_ CONST DXGKARG_PRESENT_DIS
 			Status = WriteDataIrp(pDst, screenWidth*screenHeight * 2);
 		} */
 
-		return m_HardwareBlt[pPresentDisplayOnly->VidPnSourceId].ExecutePresentDisplayOnly(pDst,
-				DstBitPerPixel,
-				(BYTE*)pPresentDisplayOnly->pSource,
-				pPresentDisplayOnly->BytesPerPixel,
-				pPresentDisplayOnly->Pitch,
-				pPresentDisplayOnly->NumMoves,
-				pPresentDisplayOnly->pMoves,
-				pPresentDisplayOnly->NumDirtyRects,
-				pPresentDisplayOnly->pDirtyRect,
-				RotationNeededByFb);
+		//return m_HardwareBlt[pPresentDisplayOnly->VidPnSourceId].ExecutePresentDisplayOnly(pDst,
+		//		DstBitPerPixel,
+		//		(BYTE*)pPresentDisplayOnly->pSource,
+		//		pPresentDisplayOnly->BytesPerPixel,
+		//		pPresentDisplayOnly->Pitch,
+		//		pPresentDisplayOnly->NumMoves,
+		//		pPresentDisplayOnly->pMoves,
+		//		pPresentDisplayOnly->NumDirtyRects,
+		//		pPresentDisplayOnly->pDirtyRect,
+		//		RotationNeededByFb);
 
     }
 
