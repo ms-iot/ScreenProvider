@@ -9,6 +9,10 @@
 \**************************************************************************/
 
 #include "BDD.hxx"
+#include "ILI9341.hxx"
+#define RESHUB_USE_HELPER_ROUTINES
+#include "RESHUB.hxx"
+#include "GPIO.h"
 
 typedef struct
 {
@@ -58,6 +62,8 @@ KSTART_ROUTINE HwContextWorkerThread;
 struct DoPresentMemory
 {
     PVOID                     DstAddr;
+	size_t					  ScreenWidth;
+	size_t				      ScreenHeight;
     UINT                      DstStride;
     ULONG                     DstBitPerPixel;
     UINT                      SrcWidth;
@@ -179,6 +185,408 @@ BDD_HWBLT::~BDD_HWBLT()
     SetPresentWorkerThreadInfo(NULL);
 }
 
+NTSTATUS BDD_HWBLT::InitSpiAndGpio(DXGK_DEVICE_INFO *deviceInfo)
+{
+	PAGED_CODE();
+
+	NTSTATUS Status;
+
+	BOOLEAN fConnectionIdSpiFound = FALSE;
+	BOOLEAN fConnectionIdGpioFound = FALSE;
+	LARGE_INTEGER connectionIdSpi = { 0 };
+	LARGE_INTEGER connectionIdGpio = { 0 };
+
+	//Find a connection ID for SPI and GPIO
+	{
+		const CM_RESOURCE_LIST* resourceListPtr = deviceInfo->TranslatedResourceList;
+		const CM_PARTIAL_RESOURCE_LIST* partialResourceListPtr = &resourceListPtr->List[0].PartialResourceList;
+
+		// Look for a memory resource and an interrupt resource
+		const ULONG resourceCount = partialResourceListPtr->Count;
+		for (ULONG i = 0; i < resourceCount; ++i)
+		{
+			const CM_PARTIAL_RESOURCE_DESCRIPTOR* resourcePtr = &partialResourceListPtr->PartialDescriptors[i];
+			//Determine the resource type.
+			switch (resourcePtr->Type)
+			{
+			case CmResourceTypeConnection:
+			{
+				//check against expected connection types.
+				UCHAR Class = resourcePtr->u.Connection.Class;
+				UCHAR Type = resourcePtr->u.Connection.Type;
+
+				if (Class == CM_RESOURCE_CONNECTION_CLASS_SERIAL)
+				{
+					if (Type == CM_RESOURCE_CONNECTION_TYPE_SERIAL_SPI)
+					{
+						if (fConnectionIdSpiFound == FALSE)
+						{
+							//Save the SPI connection id
+							connectionIdSpi.LowPart = resourcePtr->u.Connection.IdLowPart;
+							connectionIdSpi.HighPart = resourcePtr->u.Connection.IdHighPart;
+							fConnectionIdSpiFound = TRUE;
+						}
+					}
+
+				}
+
+				if (Class == CM_RESOURCE_CONNECTION_CLASS_GPIO)
+				{
+					if (Type == CM_RESOURCE_CONNECTION_TYPE_GPIO_IO)
+					{
+						if (fConnectionIdGpioFound == FALSE)
+						{
+							//Save the GPIO connection id
+							connectionIdGpio.LowPart = resourcePtr->u.Connection.IdLowPart;
+							connectionIdGpio.HighPart = resourcePtr->u.Connection.IdHighPart;
+							fConnectionIdGpioFound = TRUE;
+						}
+					}
+				}
+
+			}
+			break;
+			default:
+				//Don't care if not SPI or GPIO
+				break;
+			}
+		}
+
+	}
+
+	//Get a device path name for SPI
+	DECLARE_UNICODE_STRING_SIZE(spbDeviceName, RESOURCE_HUB_PATH_SIZE);
+	Status = RESOURCE_HUB_CREATE_PATH_FROM_ID(&spbDeviceName,
+		connectionIdSpi.LowPart,
+		connectionIdSpi.HighPart);
+
+	if (!NT_SUCCESS(Status))
+	{
+		return Status;
+	}
+
+	//Open a file handle for SPI
+	m_spiDeviceObject = nullptr;
+	m_spiFileObjectPointer = nullptr;
+	Status = IoGetDeviceObjectPointer(&spbDeviceName,
+		(FILE_WRITE_DATA | FILE_READ_DATA),
+		&m_spiFileObjectPointer,
+		&m_spiDeviceObject);
+
+	if (!NT_SUCCESS(Status))
+	{
+		return Status;
+	}
+
+	//Get a device path name for GPIO
+	DECLARE_UNICODE_STRING_SIZE(gpioDeviceName, RESOURCE_HUB_PATH_SIZE);
+	Status = RESOURCE_HUB_CREATE_PATH_FROM_ID(&gpioDeviceName,
+		connectionIdGpio.LowPart,
+		connectionIdGpio.HighPart);
+
+	if (!NT_SUCCESS(Status))
+	{
+		return Status;
+	}
+
+	//Open a file handle for GPIO
+	m_gpioDeviceObject = nullptr;
+	m_gpioFileObjectPointer = nullptr;
+	Status = IoGetDeviceObjectPointer(&gpioDeviceName,
+		(GENERIC_READ | GENERIC_WRITE),
+		&m_gpioFileObjectPointer,
+		&m_gpioDeviceObject);
+
+	if (!NT_SUCCESS(Status))
+	{
+		return Status;
+	}
+
+	Status = InitializeAdafruitPiTFT();
+
+	return Status;
+}
+
+NTSTATUS BDD_HWBLT::WriteDataIrp(PBYTE pBuffer, size_t bufferByteLength)
+{
+	NTSTATUS Status;
+	IO_STATUS_BLOCK IoStatus;
+	KEVENT event;
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+
+	//Allocate IRP
+	_IRP* Irp = IoBuildSynchronousFsdRequest(IRP_MJ_WRITE,
+		m_spiDeviceObject,
+		pBuffer, bufferByteLength, NULL, &event, &IoStatus);
+
+	PIO_STACK_LOCATION irpSp = IoGetNextIrpStackLocation(Irp);
+	irpSp->FileObject = m_spiFileObjectPointer;
+
+	//call driver
+	Status = IoCallDriver(m_spiDeviceObject, Irp);
+
+	if (Status == STATUS_PENDING)
+	{
+		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+		Status = Irp->IoStatus.Status;
+	}
+
+	return Status;
+}
+
+NTSTATUS BDD_HWBLT::WriteGpioIrp(PBYTE pGpioData)
+{
+	NTSTATUS Status;
+	IO_STATUS_BLOCK IoStatus;
+	KEVENT event;
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+
+	//Allocate Irp 
+	_IRP* Irp = IoBuildDeviceIoControlRequest(IOCTL_GPIO_WRITE_PINS,
+		m_gpioDeviceObject,
+		pGpioData, 1, NULL, 0, FALSE, &event, &IoStatus);
+
+	PIO_STACK_LOCATION irpSp = IoGetNextIrpStackLocation(Irp);
+	irpSp->FileObject = m_gpioFileObjectPointer;
+
+	//Call driver
+	Status = IoCallDriver(m_gpioDeviceObject, Irp);
+
+	if (Status == STATUS_PENDING)
+	{
+		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+		Status = Irp->IoStatus.Status;
+	}
+
+	return Status;
+}
+
+NTSTATUS BDD_HWBLT::WriteCommandIrp(PBYTE pBuffer, size_t bufferByteLength)
+{
+	NTSTATUS Status;
+	BYTE gpioData = 0x00;
+
+	//Pull GPIO low 
+	Status = WriteGpioIrp(&gpioData);
+
+	//Send Command using
+	Status = WriteDataIrp(pBuffer, bufferByteLength);
+
+	//pull GPIO high
+	gpioData = 0x01;
+	Status = WriteGpioIrp(&gpioData);
+
+	return Status;
+}
+
+NTSTATUS BDD_HWBLT::InitializeAdafruitPiTFT()
+{
+	NTSTATUS Status;
+	//const int kResetDelay = 5;
+	static BYTE resetCommand = ILI9341_SOFTWARE_RESET;
+	static BYTE clearDisplayCommand = ILI9341_DISP_OFF;
+	static BYTE gpioData = 0x01;
+	//static BYTE testValue[] = {0x12, 0x34, 0x56, 0x78};
+	//PBYTE ptestValue = testValue;
+
+	//Set gpio as known state high
+	Status = WriteGpioIrp(&gpioData);
+	//Status = WriteDataIrp(ptestValue, sizeof(testValue));
+
+	//Startup Sequence
+	static BYTE powerControlB = ILI9341_PW_CTRLB;
+	static BYTE powerControlBParameters[] = { 0x00, 0x83, 0x30 };
+	PBYTE pPowerControlBParameters = powerControlBParameters;
+
+	static BYTE powerOnSequenceControl = ILI9341_PWR_SEQ;
+	static BYTE powerOnSequenceControlParameters[] = { 0x64, 0x03, 0x12, 0x81 };
+	PBYTE pPowerOnSequenceControlParameters = powerOnSequenceControlParameters;
+
+	static BYTE driverTimingControlA = ILI9341_TIMING_CTRLA;
+	static BYTE driverTimingControlAParameters[] = { 0x85, 0x01, 0x79 };
+	PBYTE pDriverTimingControlAParameters = driverTimingControlAParameters;
+
+	static BYTE powerControlA = ILI9341_PW_CTRLA;
+	static BYTE powerControlAParameters[] = { 0x39, 0x2C, 0x00, 0x34, 0x02 };
+	PBYTE pPowerControlAParameters = powerControlAParameters;
+
+	static BYTE pumpRatioControl = ILI9341_PUMP_RATIO_CTRL;
+	static BYTE pumpRatioControlParameters[] = { 0x20 };
+	PBYTE pPumpRatioControlParameters = pumpRatioControlParameters;
+
+	static BYTE driverTimingControlB = ILI9341_TIMING_CTRLB;
+	static BYTE driverTimingControlBParameters[] = { 0x00, 0x00 };
+	PBYTE pDriverTimingControlBParameters = driverTimingControlBParameters;
+
+	Status = WriteCommandIrp(&resetCommand, sizeof(resetCommand));
+	Status = WriteCommandIrp(&clearDisplayCommand, sizeof(clearDisplayCommand));
+
+	Status = WriteCommandIrp(&powerControlB, sizeof(powerControlB));
+	Status = WriteDataIrp(pPowerControlBParameters, sizeof(powerControlBParameters));
+
+	Status = WriteCommandIrp(&powerOnSequenceControl, sizeof(powerOnSequenceControl));
+	Status = WriteDataIrp(pPowerOnSequenceControlParameters, sizeof(powerOnSequenceControlParameters));
+
+	Status = WriteCommandIrp(&driverTimingControlA, sizeof(driverTimingControlA));
+	Status = WriteDataIrp(pDriverTimingControlAParameters, sizeof(driverTimingControlAParameters));
+
+	Status = WriteCommandIrp(&powerControlA, sizeof(powerControlA));
+	Status = WriteDataIrp(pPowerControlAParameters, sizeof(powerControlAParameters));
+
+	Status = WriteCommandIrp(&pumpRatioControl, sizeof(pumpRatioControl));
+	Status = WriteDataIrp(pPumpRatioControlParameters, sizeof(pumpRatioControlParameters));
+
+	Status = WriteCommandIrp(&driverTimingControlB, sizeof(driverTimingControlB));
+	Status = WriteDataIrp(pDriverTimingControlBParameters, sizeof(driverTimingControlBParameters));
+
+	//Power control fix array?
+	static BYTE powerControl1 = ILI9341_PW_CTRL1;
+	static BYTE powerControl1Parameter = 0x26;
+	static BYTE powerControl2 = ILI9341_PW_CTRL2;
+	static BYTE powerControl2Parameter = 0x11;
+
+	Status = WriteCommandIrp(&powerControl1, sizeof(powerControl1));
+	Status = WriteDataIrp(&powerControl1Parameter, sizeof(powerControl1Parameter));
+	Status = WriteCommandIrp(&powerControl2, sizeof(powerControl2));
+	Status = WriteDataIrp(&powerControl2Parameter, sizeof(powerControl2Parameter));
+
+	//VCOM
+	static BYTE VCOMControl1 = ILI9341_VCOM_CTRL1;
+	static BYTE VCOMControl1Parameter[] = { 0x35, 0x3E };
+	PBYTE pVCOMControl1Parameter = VCOMControl1Parameter;
+	static BYTE VCOMControl2 = ILI9341_VCOM_CTRL2;
+	static BYTE VCOMControl2Parameter[] = { 0xBE };
+	PBYTE pVCOMControl2Parameter = VCOMControl2Parameter;
+
+	Status = WriteCommandIrp(&VCOMControl1, sizeof(VCOMControl1));
+	Status = WriteDataIrp(pVCOMControl1Parameter, sizeof(VCOMControl1Parameter));
+	Status = WriteCommandIrp(&VCOMControl2, sizeof(VCOMControl2));
+	Status = WriteDataIrp(pVCOMControl2Parameter, sizeof(VCOMControl2Parameter));
+
+	//Pixel Format control, RIM[7], DPI[6:4], DBI[3:1], X
+	static BYTE COLMODPixelFormatSet = ILI9341_PIX_SET;
+	static BYTE COLMODPixelFormatSetParameters[] = { 0x55 };
+	PBYTE pCOLMODPixelFormatSetParameters = COLMODPixelFormatSetParameters;
+
+	Status = WriteCommandIrp(&COLMODPixelFormatSet, sizeof(COLMODPixelFormatSet));
+	Status = WriteDataIrp(pCOLMODPixelFormatSetParameters, sizeof(COLMODPixelFormatSetParameters));
+
+	//extended command, RGB Interface Signal Control, RCM is [6:5] either 10 or 11, nothing changes
+	static BYTE rgbInterfaceControl = 0xB0;
+	static BYTE rgbInterfaceParamter[] = { 0xD0 };
+	PBYTE pRgbInterfaceParamter = rgbInterfaceParamter;
+
+	Status = WriteCommandIrp(&rgbInterfaceControl, sizeof(rgbInterfaceControl));
+	Status = WriteDataIrp(pRgbInterfaceParamter, sizeof(rgbInterfaceControl));
+
+	//interface control, doesn't do anything right now, default value 01,00,00, RIM is last bit in 3rd command
+	static BYTE interfaceControl = ILI9341_INTERFACE_CTRL;
+	static BYTE interfaceParamter[] = { 0x01, 0x00, 0x00 };
+	PBYTE pInterfaceParamter = interfaceParamter;
+
+	Status = WriteCommandIrp(&interfaceControl, sizeof(interfaceControl));
+	Status = WriteDataIrp(pInterfaceParamter, sizeof(interfaceParamter));
+
+	//frame rate
+	static BYTE frameRateControl = ILI9341_FRM_RATE_CTRL1;
+	static BYTE frameRateControlParameters[] = { 0x00, 0x15 };
+	PBYTE pFrameRateControlParameters = frameRateControlParameters;
+
+	Status = WriteCommandIrp(&frameRateControl, sizeof(frameRateControl));
+	Status = WriteDataIrp(pFrameRateControlParameters, sizeof(frameRateControlParameters));
+
+	//gamma
+	static BYTE gammaSet = ILI9341_GAMMA_SET;
+	static BYTE gammaSetParameters[] = { 0x01 };
+	PBYTE pGammaSetParameters = gammaSetParameters;
+
+	Status = WriteCommandIrp(&gammaSet, sizeof(gammaSet));
+	Status = WriteDataIrp(pGammaSetParameters, sizeof(gammaSetParameters));
+
+	//Frame copy control
+	BYTE memAccess = ILI9341_MEM_ACCESS_CTRL;
+	BYTE memAccessParameters[] = { 0xE0 };
+	PBYTE pMemAccessParameters = memAccessParameters;
+
+	Status = WriteCommandIrp(&memAccess, sizeof(memAccess));
+	Status = WriteDataIrp(pMemAccessParameters, sizeof(memAccessParameters));
+
+	//display
+	static BYTE entryModeSet = ILI9341_ENTRY_MODE_SET;
+	static BYTE entryModeSetParameter[] = { 0x07 };
+	PBYTE pEntryModeSetParameter = entryModeSetParameter;
+
+	static BYTE displayFunctionControl = ILI9341_DISP_FUNC_CTRL;
+	static BYTE displayFunctionControlParameters[] = { 0x0A, 0x82, 0x27, 0x00 };
+	PBYTE pDisplayFunctionControlParameters = displayFunctionControlParameters;
+
+	static BYTE sleepOut = ILI9341_SLEEP_MODE_OUT;
+	static BYTE displayOn = ILI9341_DISP_ON;
+
+	Status = WriteCommandIrp(&entryModeSet, sizeof(entryModeSet));
+	Status = WriteDataIrp(pEntryModeSetParameter, sizeof(entryModeSetParameter));
+
+	Status = WriteCommandIrp(&displayFunctionControl, sizeof(displayFunctionControl));
+	Status = WriteDataIrp(pDisplayFunctionControlParameters, sizeof(displayFunctionControlParameters));
+
+	Status = WriteCommandIrp(&sleepOut, sizeof(sleepOut));
+	Status = WriteCommandIrp(&displayOn, sizeof(displayOn));
+
+	return Status;
+}
+
+VOID BDD_HWBLT::CleanUp()
+{
+	//Deference spi file pointer
+	if (m_spiFileObjectPointer != nullptr)
+	{
+		ObDereferenceObject(m_spiFileObjectPointer);
+	}
+
+	//Deference gpio file pointer
+	if (m_gpioFileObjectPointer != nullptr)
+	{
+		ObDereferenceObject(m_gpioFileObjectPointer);
+	}
+}
+
+NTSTATUS BDD_HWBLT::SetWindow(int x, int y, int w, int h)
+{
+	NTSTATUS Status;
+	int windowWidth = (x + w - 1);
+	int windowHeight = (y + h - 1);
+
+	//initialize column addressing
+	BYTE setColumnAddress = ILI9341_COLUMN_ADDRESS_SET;
+	BYTE setColumnAddressParameters[] = {
+		(BYTE)((x >> 8) & 0xFF),
+		(BYTE)(x & 0xFF),
+		(BYTE)((windowWidth >> 8) & 0xFF),
+		(BYTE)(windowWidth & 0xFF)
+	};
+	PBYTE pSetColumnAddressParameters = setColumnAddressParameters;
+
+	//initialize page addressing
+	BYTE setPageAddress = ILI9341_PAGE_ADDRESS_SET;
+	BYTE setPageAddressParameters[] = {
+		(BYTE)((y >> 8) & 0xFF),
+		(BYTE)(y & 0xFF),
+		(BYTE)((windowHeight >> 8) & 0xFF),
+		(BYTE)(windowHeight & 0xFF)
+	};
+	PBYTE pSetPageAddressParameters = setPageAddressParameters;
+
+	//set column address
+	Status = WriteCommandIrp(&setColumnAddress, sizeof(setColumnAddress));
+	Status = WriteDataIrp(pSetColumnAddressParameters, sizeof(setColumnAddressParameters));
+
+	//set page address
+	Status = WriteCommandIrp(&setPageAddress, sizeof(setPageAddress));
+	Status = WriteDataIrp(pSetPageAddressParameters, sizeof(setPageAddressParameters));
+
+	return Status;
+}
+
 #pragma warning(push)
 #pragma warning(disable:26135) // The function doesn't lock anything
 
@@ -235,7 +643,9 @@ BDD_HWBLT::SetPresentWorkerThreadInfo(
 
 NTSTATUS
 BDD_HWBLT::ExecutePresentDisplayOnly(
-    _In_ BYTE*             DstAddr,
+	_In_ BYTE*             DstAddr,
+	_In_ size_t			   screenHeight,
+	_In_ size_t			   screenWidth,
     _In_ UINT              DstBitPerPixel,
     _In_ BYTE*             SrcAddr,
     _In_ UINT              SrcBytesPerPixel,
@@ -255,7 +665,9 @@ BDD_HWBLT::ExecutePresentDisplayOnly(
   Arguments:
 
     DstAddr - address of destination surface
-    DstBitPerPixel - color depth of destination surface
+	screenHeight - height in pixels of the display
+	screenWidth - width in pixels of the display
+	DstBitPerPixel - color depth of destination surface
     SrcAddr - address of source surface
     SrcBytesPerPixel - bytes per pixel of source surface
     SrcPitch - source surface pitch (bytes in a row)
@@ -294,6 +706,8 @@ BDD_HWBLT::ExecutePresentDisplayOnly(
     const CURRENT_BDD_MODE* pModeCur = m_DevExt->GetCurrentMode(m_SourceId);
 
     ctx->DstAddr          = DstAddr;
+	ctx->ScreenWidth	  = screenWidth;
+	ctx->ScreenHeight	  = screenHeight;
     ctx->DstBitPerPixel   = DstBitPerPixel;
     ctx->DstStride        = pModeCur->DispInfo.Pitch;
     ctx->SrcWidth         = pModeCur->SrcModeWidth;
@@ -541,10 +955,15 @@ HwExecutePresentDisplayOnly(
 
     if(ctx->SynchExecution)
     {
-        // This code simulates Blt executed synchronously
-        // nothing should be done here, just exit
-        ;
-    }
+		BDD_HWBLT* displaySource = ctx->DisplaySource;
+
+		BYTE colorSet = 0x2C;
+		size_t screenWidth = ctx->ScreenWidth;
+		size_t screenHeight = ctx->ScreenHeight;
+		NTSTATUS Status = displaySource->SetWindow(0, 0, screenWidth, screenHeight);
+		Status = displaySource->WriteCommandIrp(&colorSet, sizeof(colorSet));
+		Status = displaySource->WriteDataIrp((BYTE*)ctx->DstAddr, screenWidth*screenHeight * 2);
+	}
     else
     {
         // TRUE == completed
