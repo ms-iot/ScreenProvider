@@ -155,9 +155,27 @@ public:
 
     ~BDD_HWBLT();
 
+	NTSTATUS InitSpiAndGpio(DXGK_DEVICE_INFO *deviceInfo);
+
+	NTSTATUS WriteDataIrp(_In_ PBYTE pBuffer, _In_ size_t bufferByteLength);
+
+	NTSTATUS WriteCommandIrp(_In_ PBYTE pBuffer, _In_ size_t bufferByteLength);
+
+//	NTSTATUS WriteDataTestFrameSpeedIrp(_In_ PBYTE pBuffer, _In_ size_t bufferByteLength);
+
+	NTSTATUS WriteGpioIrp(PBYTE pGpioData);
+
+	NTSTATUS SetWindow(int x, int y, int w, int h);
+
+	NTSTATUS InitializeAdafruitPiTFT();
+
+	VOID CleanUp();
+
     void Initialize(_In_ BASIC_DISPLAY_DRIVER* DevExt, _In_ UINT IdSrc) { m_DevExt = DevExt; m_SourceId = IdSrc; }
     void SetPresentWorkerThreadInfo(HANDLE hWorkerThread);
     NTSTATUS ExecutePresentDisplayOnly(_In_ BYTE*             DstAddr,
+									   _In_ size_t			  screenHeight,
+									   _In_ size_t			  screenWidth,
                                        _In_ UINT              DstBitPerPixel,
                                        _In_ BYTE*             SrcAddr,
                                        _In_ UINT              SrcBytesPerPixel,
@@ -168,16 +186,17 @@ public:
                                        _In_ RECT*             pDirtyRect,
                                        _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation);
 
+private:
+	DEVICE_OBJECT* m_spiDeviceObject;
+	FILE_OBJECT* m_spiFileObjectPointer;
+	DEVICE_OBJECT* m_gpioDeviceObject;
+	FILE_OBJECT* m_gpioFileObjectPointer;
 };
 
 class BASIC_DISPLAY_DRIVER
 {
 private:
     DEVICE_OBJECT* m_pPhysicalDevice;
-	DEVICE_OBJECT* m_spiDeviceObject;
-	FILE_OBJECT* m_spiFileObjectPointer; 
-	DEVICE_OBJECT* m_gpioDeviceObject;
-	FILE_OBJECT* m_gpioFileObjectPointer;
     DXGKRNL_INTERFACE m_DxgkInterface;
 
     // Information passed in by StartDevice DDI
@@ -294,18 +313,6 @@ public:
 
     //For testing Irp 
     static NTSTATUS TestCompletionRoutine(_In_ PDEVICE_OBJECT deviceObject, _In_ PIRP Irp, _In_ PVOID Context);
-
-	NTSTATUS WriteDataIrp(_In_ PBYTE pBuffer, _In_ size_t bufferByteLength);
-
-	NTSTATUS WriteCommandIrp(_In_ PBYTE pBuffer, _In_ size_t bufferByteLength);
-
-	NTSTATUS WriteDataTestFrameSpeedIrp(_In_ PBYTE pBuffer, _In_ size_t bufferByteLength);
-
-	NTSTATUS WriteGpioIrp(PBYTE pGpioData);
-
-	NTSTATUS SetWindow(int x, int y, int w, int h);
-
-	NTSTATUS InitializeAdafruitPiTFT();
 
 	BYTE CalculateColorCode(_In_ int integer);
 
